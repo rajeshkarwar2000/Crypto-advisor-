@@ -736,7 +736,7 @@ pc_ = lambda x: "n/a" if x is None or pd.isna(x) else f"{x * 100:+.0f}%"
 def trust_banner():
     if not VS:
         st.warning("The model could not be tested on past months with this coin list. Treat every number as a guess."); return
-    {"Strong": st.success, "Moderate": st.info}.get(VS["verdict"], st.warning)(
+    {"Strong": st.success, "Moderate": st.info, "Promising": st.info}.get(VS["verdict"], st.warning)(
         f"**Model reliability: {VS['verdict']}.** {VS['verdict_text']} In {VS['n_folds']} out-of-sample months its top {VS['topn']} picks rose "
         f"{VS['top_win'] * 100:.0f}% of the time (all coins: {VS['base_up'] * 100:.0f}%) and averaged {VS['top_ret'] * 100:+.1f}% against {VS['market_ret'] * 100:+.1f}% for the average coin. Details: Tools > Model accuracy.")
     st.caption(f"🌐 Global backdrop in the model: {'used' if MODEL.get('macro_used') else 'tested but not used (it did not help out-of-sample)' if MODEL.get('macro_ic') is not None else 'unavailable'}"
@@ -749,12 +749,28 @@ def trust_banner():
 def predict_section():
     live.update(live_prices(tuple(need)))
     p_top, p_all, p_find = st.tabs(["🔮 Top 30-day picks", "📋 All coins", "🔍 Find a coin & watchlist"])
-    with p_top, box("Coins with the highest predicted 1-month potential", "top", f"Ranked from {len(tbl)} liquid coins as of {ASOF:%d %b %Y}. No minimum gain: the best potential, whatever its size."):
+    with p_top, box("Coins to consider buying (highest predicted 1-month potential)", "top", f"Ranked from {len(tbl)} liquid coins as of {ASOF:%d %b %Y}. No minimum gain: the best potential, whatever its size."):
+        if st.session_state.get("pr_uni_seen") != uni: st.session_state["pr_uni"] = uni; st.session_state["pr_uni_seen"] = uni   # follow changes made in Settings
+        pick = st.selectbox("Coins to search", list(E.UNIVERSES), key="pr_uni",
+                            help="Major = fastest. Broad = ~130 coins. Top 300 = slowest. The model re-trains for the list you choose (20 to 60 seconds).")
+        if pick != uni: st.session_state["cfg"] = {**S, "uni": pick}; st.rerun()
+        _miss = [c for c in base if c not in close.columns]
+        st.caption(f"Coins searched: {len(close.columns)} loaded of {len(base)} in this list · {len(tbl)} passed the liquidity filter" + (f" · no price data for: {', '.join(_miss[:12])}" + (" …" if len(_miss) > 12 else "") if _miss else ""))
         trust_banner()
+        _sig = {sym: E.idea_signal(r)[0] for sym, r in tbl.iterrows()}
+        buys = [sym for sym in tbl.index if _sig[sym] == "BUY"][:topn]
+        rest = [sym for sym in tbl.index if sym not in buys][:topn]
+        st.subheader("🟢 Buy candidates")
+        if not buys: st.info("No coin passes the app's buy test right now (the model expects a flat or falling month, or the coin is overheated). The best of the rest are listed below. Waiting is a valid choice.")
         cols = st.columns(2)
-        for n_, (sym, r) in enumerate(tbl.head(topn).iterrows()):
-            price = px(sym); price = price if price == price else r.price
+        for n_, sym in enumerate(buys):
+            r = tbl.loc[sym]; price = px(sym); price = price if price == price else r.price
             with cols[n_ % 2]: idea_card(sym, r, "top", n_, price, day_pct(sym, price))
+        with st.expander(f"Other coins: wait or avoid ({len(rest)} shown)", expanded=not buys):
+            cols = st.columns(2)
+            for n_, sym in enumerate(rest):
+                r = tbl.loc[sym]; price = px(sym); price = price if price == price else r.price
+                with cols[n_ % 2]: idea_card(sym, r, "oth", n_, price, day_pct(sym, price))
         st.caption("Predictions come from a gradient-boosting model trained on every coin's past 30-day outcomes, using momentum, volatility, volume, trend and market-wide features. It estimates probabilities, not certainties.")
     with p_all, box("Every coin that passes the liquidity filter", "all", "Sortable. Download it as a spreadsheet."):
         show = pd.DataFrame({"Rank": tbl["rank"].astype(int), "Coin": tbl.index, "Price $": tbl.price, "Predicted 30d": tbl.g_med * 100,
@@ -1086,7 +1102,11 @@ with t_ai:
             notes = st.text_area("Optional: your own notes on news, regulation or events to include", acct.get("notes", ""), height=90,
                                  placeholder="e.g. Spot ETF inflows hit a record this week; a big token unlock for X next Tuesday; new stablecoin rules")
             if notes != acct.get("notes", ""): acct["notes"] = notes; save()
-            prompt = E.build_prompt(kind, own, build_context(), dt.date.today())
+            _scopes = list(E.UNIVERSES) + [E.ANY_COIN]
+            scope = st.selectbox("Which coins should Gemini search?", _scopes, index=_scopes.index(uni) if uni in _scopes else 0, key="g_scope",
+                                 help="Major or Broad limits Gemini to that list. 'Any coin' lets it search freely, including new and small coins (riskier).")
+            _syms = None if scope == E.ANY_COIN else tuple(universe_symbols(scope, extra))
+            prompt = E.build_prompt(kind, own, build_context(), dt.date.today(), scope, _syms)
             copy_open_gemini(prompt)
             with st.expander("Show prompt text"): st.code(prompt, language=None)
         with box("② Paste Gemini's reply", "gp2", "Gemini's answer becomes buy cards below"):
@@ -1109,20 +1129,23 @@ with t_ai:
                     hits = search_coins(r.get("name") or sym); al[sym] = hits[0]["symbol"] if hits else ""; save()
                     if al[sym]: st.rerun()
                 last = px(use); dp = day_pct(use, last)
-                act = str(r["action"]).lower(); sig = "SELL" if "avoid" in act or "sell" in act else "HOLD" if "wait" in act or "hold" in act else "BUY"
+                sig = E.rec_signal(r["action"], held=use in held); avoid = sig in ("AVOID", "SELL")
                 with cols[i % 2], st.container(border=True, key=f"card_rec_{i}"):
                     tags = U.hz_chip(HZ_TAG) + U.action_chip(sig) + U.chips([(f"{r['confidence']} confidence", "info")] if r["confidence"] else [])
                     tags += U.chips([(f"{r['liquidity']} liquidity", "muted")] if r.get("liquidity") else [])
                     if r.get("agrees"): tags += U.chips([(f"Agrees with app model: {r['agrees']}", "muted")])
                     if use in tbl.index: tags += U.chips([(f"App model: {tbl.loc[use, 'p_up'] * 100:.0f}% chance up", "info")])
                     st.markdown(U.stock_head_html(use, r.get("name"), last, dp, tags), unsafe_allow_html=True)
-                    if last == last: st.markdown(U.levels_html(last, r["entry"], r["stop"], r["target"]), unsafe_allow_html=True)
-                    else: st.caption(f"Entry {U.usd(r['entry'])} · Stop-loss {U.usd(r['stop'])} · Target {U.usd(r['target'])}")
+                    if avoid: st.caption("Not a buy right now" + (" · you hold this coin, so consider reducing it" if sig == "SELL" else ": skip it for the next 30 days"))
+                    elif last == last and r["entry"] and r["stop"] and r["target"]: st.markdown(U.levels_html(last, r["entry"], r["stop"], r["target"]), unsafe_allow_html=True)
+                    elif r["entry"] or r["stop"] or r["target"]:
+                        st.caption(f"Entry {U.usd(r['entry'])} · Stop-loss {U.usd(r['stop'])} · Target {U.usd(r['target'])}")
+                        st.warning("Live price unavailable for this coin, so Gemini's levels could not be checked. Do not trade on them until you confirm the price.")
                     if r["reason"]: st.write(r["reason"])
                     for lab, k in (("📈 Market & derivatives", "market_derivs"), ("⛓ On-chain & fundamentals", "onchain_fundamentals"), ("📰 News & regulation", "news_regulation"), ("🏛 Government policy", "policy_view")):
                         if r.get(k): st.caption(f"{lab}: {r[k]}")
                     if r["risk"]: st.caption(f"⚠️ Risk: {r['risk']}")
-                    if last == last:
+                    if last == last and not avoid:
                         if r["entry"] and abs(r["entry"] / last - 1) > 0.10:
                             st.warning(f"Gemini's entry differs from the live price by {abs(r['entry'] / last - 1) * 100:.0f}%. It may have used old prices.")
                         if r["stop"] and r["stop"] >= last: st.warning("Its stop-loss is above the live price, so it is not usable as given.")
@@ -1133,6 +1156,7 @@ with t_ai:
                         c1, c2 = st.columns(2)
                         if c1.button("Buy", key=f"gr_{i}_{use}", type="primary", use_container_width=True): show_dialog("buy", use, r.get("name"), last, dp, stop_ok, tgt_ok, max(amt, 10.0))
                         watch_button(c2, use, f"rec_{i}")
+                    elif avoid: watch_button(st, use, f"rec_{i}")
                     else: st.info("No price found for this symbol on Yahoo Finance. Check it in Predict > Find a coin (try the coin's name).")
             if st.button("Clear recommendations"): acct.pop("recs", None); save(); st.rerun()
     with tb:

@@ -80,7 +80,7 @@ def hz_chip(h):
 
 
 def action_chip(sig):
-    return chip(sig, {"BUY": "buy", "SELL": "sell"}.get(sig, "hold"))
+    return chip(sig, {"BUY": "buy", "SELL": "sell", "AVOID": "sell"}.get(sig, "hold"))
 
 
 def side_chip(side):

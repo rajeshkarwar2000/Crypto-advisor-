@@ -92,8 +92,10 @@ def test_walk_forward_only_trains_on_known_outcomes():
 
 def test_reliability_labels():
     assert E.reliability({})[0] == "Unproven" and E.reliability({"n_folds": 2})[0] == "Unproven"
-    base = dict(n_folds=9, ic=0.1, ic_pos=0.8, edge=0.02)
+    base = dict(n_folds=9, ic=0.1, ic_pos=0.8, edge=0.02, top_win=0.60, base_up=0.50, top_ret=0.06, market_ret=0.02)
     assert E.reliability(base)[0] == "Strong"
+    assert E.reliability({**base, "top_win": 0.52})[0] == "Promising"       # modest win-rate edge is not "Strong"
+    assert E.reliability({**base, "top_ret": 0.03})[0] == "Promising"       # modest return edge is not "Strong"
     assert E.reliability({**base, "n_folds": 6})[0] == "Moderate"           # too few months for Strong
     assert E.reliability({**base, "ic": 0.04, "ic_pos": 0.6})[0] == "Moderate"
     assert E.reliability({**base, "ic": 0.0, "ic_pos": 0.4})[0] == "Weak"
@@ -204,7 +206,7 @@ def test_parse_recs_and_symbols():
 ```
 Not advice."""
     items = E.parse_recs(reply)
-    assert [i["symbol"] for i in items] == ["BTC", "ETH", "SOL", "USDT"]
+    assert [i["symbol"] for i in items] == ["BTC", "ETH", "SOL", "USDT"]      # Buy now first, then wait / unclear
     assert items[0]["entry"] == 97000.5 and items[0]["stop"] == 90000 and items[0]["market_derivs"] == "Funding neutral" and items[1]["risk"] == ""
     assert E.parse_recs("no json here") is None and E.parse_recs("[not json]") is None and E.parse_recs('[{"foo":1}]') == []
     assert [E.norm_symbol(x) for x in ("Coinbase:ETH-USD", "SOLUSDT", "doge", "ADA/USDC")] == ["ETH", "SOL", "DOGE", "ADA"]
@@ -349,3 +351,16 @@ def test_gemini_prompt_has_required_actions_and_policy_fields():
         assert k in p, k
     it = E.parse_recs('[{"symbol":"BTC","policy_view":"ETF flows support","agrees_with_app_model":"partly"}]')[0]
     assert it["policy_view"] == "ETF flows support" and it["agrees"] == "partly"
+
+
+def test_buy_first_order_tags_and_scope():
+    reply = ('[{"symbol":"AAA","action":"Avoid"},{"symbol":"BBB","action":"Wait for dip","entry":1,"stop_loss":0.9,"target":1.2},'
+             '{"symbol":"CCC","action":"Buy now","entry":2,"stop_loss":1.8,"target":2.5},{"symbol":"DDD","action":"Buy now","entry":3,"stop_loss":2,"target":4}]')
+    assert [i["symbol"] for i in E.parse_recs(reply)] == ["CCC", "DDD", "BBB", "AAA"]   # buys first, stable inside a group
+    assert E.rec_signal("Buy now") == "BUY" and E.rec_signal("Wait for dip") == "HOLD" and E.rec_signal("") == "HOLD"
+    assert E.rec_signal("Avoid") == "AVOID" and E.rec_signal("Avoid", held=True) == "SELL"
+    import datetime as dt
+    p = E.build_prompt(E.PROMPT_KINDS[0], "", "ctx", dt.date(2026, 11, 22), "Major coins", ("BTC", "ETH"))
+    assert "BUY IDEAS FIRST" in p and "choose ONLY from these 2 coins" in p and "BTC, ETH" in p and p.index("Buy now") < p.index("Avoid")
+    free = E.build_prompt(E.PROMPT_KINDS[0], "", "ctx", dt.date(2026, 11, 22), E.ANY_COIN, None)
+    assert "any liquid coin" in free and "choose ONLY" not in free

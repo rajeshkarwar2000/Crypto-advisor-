@@ -433,9 +433,14 @@ def reliability(s):
     if not s or s.get("n_folds", 0) < 3:
         return "Unproven", "Not enough history to test the model out-of-sample yet. Treat every number as a guess."
     ic, pos, edge = s["ic"], s["ic_pos"], s["edge"]
+    win_gap = s.get("top_win", 0) - s.get("base_up", 0)            # top picks' win rate minus the average coin's
+    ret_gap = s.get("top_ret", 0) - s.get("market_ret", 0)         # top picks' return minus the average coin's
     if ic >= 0.08 and pos >= 0.65 and edge > 0 and s["n_folds"] >= 8:
-        return "Strong", ("In past out-of-sample months the ranking clearly beat chance and the market. That is encouraging, but it is "
-                          "still a probability, never a promise, and a handful of months is a small sample.")
+        if win_gap >= 0.05 and ret_gap >= 0.02:
+            return "Strong", ("In past out-of-sample months the top picks clearly beat the average coin, both in how often they rose and in "
+                              "how much. That is encouraging, but it is still a probability, never a promise, and a handful of months is a small sample.")
+        return "Promising", ("The ranking beat chance in past out-of-sample months, but the top picks beat the average coin only modestly "
+                             "(win rate or return). Use it to shortlist coins, keep positions small and always use stop-losses.")
     if ic >= 0.03 and pos >= 0.55 and s["n_folds"] >= 4:
         return "Moderate", ("The ranking was somewhat better than chance in past out-of-sample months. Use it to shortlist coins, "
                             "size positions small and always use stop-losses.")
@@ -769,11 +774,13 @@ def due_daily_backup(now_local, last_date):
 PROMPT_KINDS = ["Next 30-day gainers", "Review my demo portfolio", "My own question"]
 IDEA_KINDS = [PROMPT_KINDS[0], PROMPT_KINDS[2]]
 _ASK = {PROMPT_KINDS[0]: "Pick the cryptocurrencies with the highest realistic gain potential over roughly the next 30 days, from ANY coin that is liquid "
-                         "enough to trade on major exchanges. There is NO minimum gain: rank by realistic potential, whatever the size.",
+                         "enough to trade on major exchanges. There is NO minimum gain: rank by realistic potential, whatever the size. "
+                         "BUY IDEAS FIRST: put every coin you would actually buy now (action 'Buy now') at the top, best first. Only after those, add 'Wait for dip' "
+                         "ideas, and last 'Avoid' ones. If nothing deserves a buy right now, say so by returning no 'Buy now' items.",
         PROMPT_KINDS[1]: "Review my demo holdings below and say what to buy more of, hold or avoid, and suggest better alternatives."}
 
 RESEARCH_RULES = (
-    "You may recommend ANY cryptocurrency that trades on major exchanges (large, mid or small cap, new listings, memecoins), not only the coins in the app data; "
+    "Unless a COIN LIST above restricts you, you may recommend ANY cryptocurrency that trades on major exchanges (large, mid or small cap, new listings, memecoins), not only the coins in the app data; "
     "the app data is only one input. Avoid illiquid, pump-and-dump, rug-pull-risk or freshly launched tokens and say how liquid each pick is.\n"
     "Base every pick on ALL of these, using the latest information you can find (use Google Search / web browsing):\n"
     "1. MARKET STRUCTURE: Bitcoin trend and dominance, the total market cap trend, risk-on/risk-off mood, stablecoin supply, exchange inflows/outflows, "
@@ -794,9 +801,9 @@ RESEARCH_RULES = (
 SYSTEM_RULES = ("You are a cautious, thorough cryptocurrency research assistant for a retail trader (prices in US dollars). "
                 "Use the app data provided as one input and say when something is not in it. " + RESEARCH_RULES)
 
-_FORMAT = ('Reply ONLY with a JSON array (no other text, no markdown) of up to 8 objects, each exactly like: '
+_FORMAT = ('Reply ONLY with a JSON array (no other text, no markdown) of up to 8 objects, ordered: all "Buy now" first (best first), then "Wait for dip", then "Avoid". Each exactly like: '
            '{"symbol":"ticker e.g. BTC","name":"coin name","action":"Buy now | Wait for dip | Avoid",'
-           '"entry":number in US dollars,"stop_loss":number,"target":number,"horizon":"1 month",'
+           '"entry":number in US dollars or null for Avoid,"stop_loss":number or null for Avoid,"target":number or null for Avoid,"horizon":"1 month",'
            '"confidence":"low | medium | high","liquidity":"high | medium | low","reason":"max 2 sentences",'
            '"market_derivs":"market structure / ETF flows / derivatives view, 1 sentence",'
            '"onchain_fundamentals":"on-chain activity, tokenomics, unlocks or upgrades, 1 sentence",'
@@ -805,10 +812,21 @@ _FORMAT = ('Reply ONLY with a JSON array (no other text, no markdown) of up to 8
            '"agrees_with_app_model":"yes | partly | no","risk":"main risk, 1 sentence"}')
 
 
-def build_prompt(kind, own, context, today):
+ANY_COIN = "Any coin (Gemini searches freely)"
+
+
+def scope_text(scope, symbols=None):
+    """Sentence telling Gemini which coins it may pick from. symbols: the coin list for a fixed scope."""
+    if scope and scope != ANY_COIN and symbols:
+        return (f"COIN LIST: choose ONLY from these {len(symbols)} coins ({scope}): " + ", ".join(symbols) + ". "
+                "Do not recommend any coin outside this list.\n")
+    return "COIN LIST: any liquid coin on major exchanges is allowed.\n"
+
+
+def build_prompt(kind, own, context, today, scope=None, symbols=None):
     ask = (own.strip() or "Suggest cryptocurrencies worth researching.") if kind == PROMPT_KINDS[2] else _ASK[kind]
     return (f"You are a cautious, thorough cryptocurrency research assistant for a retail trader (prices in US dollars). "
-            f"Today is {today:%d %b %Y}.\nTASK: {ask}\n{RESEARCH_RULES}\n\nApp data (one input only):\n{context}\n\n{_FORMAT}")
+            f"Today is {today:%d %b %Y}.\nTASK: {ask}\n{scope_text(scope, symbols)}{RESEARCH_RULES}\n\nApp data (one input only):\n{context}\n\n{_FORMAT}")
 
 
 def _num(v):
@@ -823,6 +841,19 @@ def norm_symbol(s):
     s = _re.sub(r"^[A-Z]+:", "", str(s).upper().strip())
     t = _re.sub(r"[-/_ ]?(USDT|USDC|USD|PERP)$", "", s)
     return t if t else s
+
+
+def rec_rank(action):
+    a = str(action).lower()
+    if "avoid" in a or "sell" in a: return 2
+    if "wait" in a or "hold" in a or "dip" in a: return 1
+    return 0 if "buy" in a else 1                                   # an unclear action is never treated as a buy
+
+
+def rec_signal(action, held=False):
+    """Tag for a Gemini idea: BUY, HOLD (wait) or AVOID. SELL only for a coin the trader already holds."""
+    r = rec_rank(action)
+    return "BUY" if r == 0 else "HOLD" if r == 1 else ("SELL" if held else "AVOID")
 
 
 def parse_recs(text):
@@ -844,6 +875,7 @@ def parse_recs(text):
                         confidence=g("confidence"), liquidity=g("liquidity"), reason=g("reason"), risk=g("risk"),
                         market_derivs=g("market_derivs"), onchain_fundamentals=g("onchain_fundamentals"), news_regulation=g("news_regulation"),
                         policy_view=g("policy_view"), agrees=g("agrees_with_app_model")))
+    out.sort(key=lambda r: rec_rank(r["action"]))                  # stable: Buy now first, then Wait, then Avoid
     return out[:10]
 
 
