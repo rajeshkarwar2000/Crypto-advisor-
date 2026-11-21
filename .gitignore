@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+portfolios/
+.streamlit/secrets.toml
+.env
+android/.gradle/
+android/build/
+android/app/build/
+scan_cache/

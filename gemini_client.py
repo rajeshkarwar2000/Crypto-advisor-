@@ -1,0 +1,28 @@
+"""Tiny Gemini REST client (generateContent)."""
+import requests
+
+URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+SYSTEM = ("You are a cautious cryptocurrency research assistant for a retail trader (prices in US dollars). "
+          "Use the app data provided as context and say when something is not in it. Give reasoning, entry/stop-loss "
+          "ideas and key risks. Never promise or guarantee returns; say plainly that crypto is extremely volatile, "
+          "any coin can lose most of its value and forecasts are uncertain. Mention that this is not financial "
+          "advice. Keep answers concise.")
+
+def ask(api_key, model, history, context="", grounded=False, timeout=60, system=None):
+    """history: list of {'role': 'user'|'model', 'text': str}. Returns reply text or raises RuntimeError."""
+    contents = [{"role": h["role"], "parts": [{"text": h["text"]}]} for h in history]
+    body = {"system_instruction": {"parts": [{"text": (system or SYSTEM) + ("\n\nApp data:\n" + context if context else "")}]},
+            "contents": contents}
+    if grounded:
+        body["tools"] = [{"google_search": {}}]
+    r = requests.post(URL.format(model=model), json=body, timeout=timeout,
+                      headers={"x-goog-api-key": api_key, "Content-Type": "application/json"})
+    if r.status_code != 200:
+        try: msg = r.json()["error"]["message"]
+        except Exception: msg = r.text[:300]
+        raise RuntimeError(f"Gemini error {r.status_code}: {msg}")
+    try:
+        parts = r.json()["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip() or "(empty reply)"
+    except Exception:
+        raise RuntimeError("Gemini returned no answer (it may have been blocked). Try rephrasing.")
