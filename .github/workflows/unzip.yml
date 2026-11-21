@@ -1,0 +1,37 @@
+name: Unzip crypto-advisor
+
+on:
+  push:
+    paths:
+      - "crypto-advisor.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unzip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip and commit the files
+        run: |
+          set -e
+          test -f crypto-advisor.zip
+          rm -rf _unpack && mkdir _unpack
+          unzip -oq crypto-advisor.zip -d _unpack
+          SRC=_unpack
+          if [ -d _unpack/crypto-advisor ]; then SRC=_unpack/crypto-advisor; fi
+          rm -rf "$SRC/.github"
+          cp -a "$SRC"/. ./
+          rm -rf _unpack
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit"
+          else
+            git commit -m "Unpack crypto-advisor.zip"
+            git push
+          fi
